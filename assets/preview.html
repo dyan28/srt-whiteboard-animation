@@ -782,26 +782,115 @@
     function tick(ts) { if (!S.playing) return; setTime(S.time + (ts - S.last)); S.last = ts; if (S.time >= totalMs()) { pause(); return; } requestAnimationFrame(tick); }
 
     // ---------- Lưu ----------
-    function markDirty() { S.dirty.add(S.idx); $('dirtyFlag').textContent = '● Chưa lưu'; updateSaveBtns(); }
-    function updateSaveBtns() { $('saveBtn').disabled = !S.dirty.has(S.idx); $('saveAllBtn').disabled = S.dirty.size === 0; }
-    $('saveBtn').addEventListener('click', () => saveScene(S.idx));
-    $('saveAllBtn').addEventListener('click', async () => { for (const i of [...S.dirty]) await saveScene(i); });
-    async function saveScene(i) {
+    function markDirty() { S.dirty.add(S.idx); updateDirtyUi(); }
+    function updateDirtyUi() {
+      const hasScene = S.idx >= 0 && !!S.cfg;
+      const curDirty = S.dirty.has(S.idx);
+      $('dirtyFlag').textContent = curDirty ? '● Chưa lưu' : (S.dirty.size ? `● ${S.dirty.size} cảnh chưa lưu` : '');
+      // Bật ngay khi đã tải cảnh — không bắt buộc phải chỉnh mới được lưu
+      $('saveBtn').disabled = !hasScene;
+      $('saveAllBtn').disabled = S.scenes.length === 0;
+    }
+    function updateSaveBtns() { updateDirtyUi(); }
+
+    /** Xin quyền ghi thư mục một lần (cần user gesture). Handle từ dir.entries() thường chỉ có quyền đọc. */
+    async function ensureDirWriteAccess() {
+      if (!S.dirHandle) return false;
+      const opts = { mode: 'readwrite' };
+      try {
+        if (S.dirHandle.queryPermission) {
+          const q = await S.dirHandle.queryPermission(opts);
+          if (q === 'granted') return true;
+        }
+        if (S.dirHandle.requestPermission) {
+          const p = await S.dirHandle.requestPermission(opts);
+          return p === 'granted';
+        }
+        return true; // đã mở bằng showDirectoryPicker({ mode: 'readwrite' })
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function writeAnnotationFile(sc, text) {
+      // Luôn ghi qua directory handle để kế thừa quyền readwrite của thư mục đã chọn
+      if (S.dirHandle && S.dirHandle.getFileHandle) {
+        const handle = await S.dirHandle.getFileHandle(sc.cfgName, { create: true });
+        const w = await handle.createWritable();
+        await w.write(text);
+        await w.close();
+        sc.cfgHandle = handle;
+        sc.hasConfig = true;
+        return 'fs';
+      }
+      // Fallback: handle từng file (hiếm) hoặc tải xuống
+      if (sc.cfgHandle && sc.cfgHandle.createWritable) {
+        const w = await sc.cfgHandle.createWritable();
+        await w.write(text);
+        await w.close();
+        sc.hasConfig = true;
+        return 'fs';
+      }
+      downloadText(sc.cfgName, text);
+      return 'download';
+    }
+
+    $('saveBtn').addEventListener('click', async () => {
+      if (!S.cfg) { toast('Chưa tải cảnh nào', true); return; }
+      if (S.dirHandle && !(await ensureDirWriteAccess())) {
+        toast('Chưa được cấp quyền ghi thư mục. Hãy mở lại thư mục và cho phép chỉnh sửa.', true);
+        return;
+      }
+      await saveScene(S.idx);
+    });
+    $('saveAllBtn').addEventListener('click', async () => {
+      if (!S.scenes.length) { toast('Chưa tải cảnh nào', true); return; }
+      if (S.dirHandle && !(await ensureDirWriteAccess())) {
+        toast('Chưa được cấp quyền ghi thư mục. Hãy mở lại thư mục và cho phép chỉnh sửa.', true);
+        return;
+      }
+      // Ưu tiên cảnh đã chỉnh; nếu chưa chỉnh gì thì lưu toàn bộ cảnh đã có cfg
+      let indices = [...S.dirty];
+      if (!indices.length) {
+        indices = S.scenes.map((sc, i) => sc.cfg ? i : -1).filter(i => i >= 0);
+      }
+      if (!indices.length) { toast('Không có cảnh nào để lưu', true); return; }
+      let ok = 0, fail = 0, lastErr = '';
+      for (const i of indices) {
+        const result = await saveScene(i, { quiet: true });
+        if (result.ok) ok++;
+        else { fail++; lastErr = result.error || lastErr; }
+      }
+      if (fail && ok) toast(`Đã lưu ${ok} cảnh; ${fail} lỗi${lastErr ? ': ' + lastErr : ''}`, true);
+      else if (fail) toast(`Không thể lưu: ${lastErr || (fail + ' cảnh')}`, true);
+      else if (ok) toast(`Đã lưu tất cả (${ok} cảnh)`);
+    });
+    async function saveScene(i, { quiet } = {}) {
       const sc = S.scenes[i];
-      // Trước khi lưu, căn tổng thời lượng theo điểm kết thúc vùng cuối cộng 0,5 giây dừng hình
-      if (i === S.idx && sc.cfg.elements && sc.cfg.elements.length) sc.cfg.sceneDurationMs = totalMs();
+      if (!sc || !sc.cfg) {
+        const error = 'Không có dữ liệu để lưu';
+        if (!quiet) toast(error, true);
+        return { ok: false, error };
+      }
+      // Căn tổng thời lượng theo điểm kết thúc vùng cuối + 0,5 giây dừng hình
+      if (sc.cfg.elements && sc.cfg.elements.length) {
+        if (i === S.idx) sc.cfg.sceneDurationMs = totalMs();
+        else {
+          const maxEnd = Math.max(...sc.cfg.elements.map(endMs));
+          sc.cfg.sceneDurationMs = Math.max(sc.cfg.sceneDurationMs || 0, maxEnd + 500, 1000);
+        }
+      }
       const text = JSON.stringify(sc.cfg, null, 2);
       try {
-        let handle = sc.cfgHandle;
-        if (!handle && S.dirHandle && S.dirHandle.getFileHandle) handle = await S.dirHandle.getFileHandle(sc.cfgName, { create: true });
-        if (handle && handle.createWritable) {
-          if (handle.requestPermission) { const perm = await handle.requestPermission({ mode: 'readwrite' }); if (perm !== 'granted') throw new Error('Chưa được cấp quyền ghi'); }
-          const w = await handle.createWritable(); await w.write(text); await w.close();
-          sc.cfgHandle = handle; sc.hasConfig = true;
-        } else { downloadText(sc.cfgName, text); }
-        S.dirty.delete(i); if (i === S.idx) $('dirtyFlag').textContent = '';
-        updateSaveBtns(); toast(`Đã lưu: ${sc.name}`);
-      } catch (e) { toast(`Không thể lưu: ${e.message}`, true); }
+        const mode = await writeAnnotationFile(sc, text);
+        S.dirty.delete(i);
+        updateDirtyUi();
+        if (!quiet) toast(mode === 'download' ? `Đã tải xuống: ${sc.cfgName}` : `Đã lưu: ${sc.name}`);
+        return { ok: true };
+      } catch (e) {
+        if (!quiet) toast(`Không thể lưu: ${e.message}`, true);
+        return { ok: false, error: e.message };
+      }
     }
     function downloadText(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
 
