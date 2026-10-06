@@ -110,20 +110,20 @@ def main(argv=None) -> int:
     try:
         raw = Path(args.srt).read_text(encoding="utf-8-sig")
     except OSError as e:
-        print(f"[err] 无法读取字幕: {e}", file=sys.stderr)
+        print(f"[err] Unable to read subtitle file: {e}", file=sys.stderr)
         return 1
 
     cues = parse_srt(raw)
     if not cues:
-        print("[err] 未解析到任何字幕条，请检查 SRT 格式", file=sys.stderr)
+        print("[err] No subtitle cues were parsed. Please check the SRT format.", file=sys.stderr)
         return 1
     scenes = group_scenes(cues, args.target_sec, args.min_sec, args.max_sec)
 
     total_ms = cues[-1]["endMs"] - cues[0]["startMs"]
-    print(f"字幕条: {len(cues)}  总时长: {total_ms/1000:.1f}s  建议场景: {len(scenes)}", file=sys.stderr)
+    print(f"Subtitle cues: {len(cues)}  Total duration: {total_ms/1000:.1f}s  Suggested scenes: {len(scenes)}", file=sys.stderr)
     for s in scenes:
-        print(f"  幕{s['sceneIndex']:>2}  {s['startMs']/1000:6.1f}-{s['endMs']/1000:6.1f}s "
-              f"({s['sceneDurationMs']/1000:4.1f}s, 字幕{s['cueRange'][0]}-{s['cueRange'][1]}): "
+        print(f"  Scene {s['sceneIndex']:>2}  {s['startMs']/1000:6.1f}-{s['endMs']/1000:6.1f}s "
+              f"({s['sceneDurationMs']/1000:4.1f}s, cues {s['cueRange'][0]}-{s['cueRange'][1]}): "
               f"{s['text'][:40]}", file=sys.stderr)
 
     json.dump({"cues": cues, "scenes": scenes}, sys.stdout, ensure_ascii=False, indent=2)
