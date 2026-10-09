@@ -4,7 +4,7 @@ export PYTHONUNBUFFERED=1
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-BUILDER="$ROOT_DIR/scripts/build_whiteboard_video.py"
+RENAMER="$ROOT_DIR/scripts/rename_whiteboard_projects.py"
 
 if [[ ! -x "$PYTHON" ]]; then
   print -u2 "[error] Chưa có môi trường Python tại $PYTHON"
@@ -12,9 +12,9 @@ if [[ ! -x "$PYTHON" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$BUILDER" ]]; then
-  print -u2 "[error] Không tìm thấy builder: $BUILDER"
+if [[ ! -f "$RENAMER" ]]; then
+  print -u2 "[error] Không tìm thấy script: $RENAMER"
   exit 1
 fi
 
-exec "$PYTHON" "$BUILDER" "$@"
+exec "$PYTHON" "$RENAMER" "$@"

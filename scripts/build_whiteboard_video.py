@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PROJECT = ROOT / "assets" / "whiteboard" / "whiteboard-vi"
+WHITEBOARD_ROOT = ROOT / "assets" / "whiteboard"
 RENDER_SCRIPT = ROOT / "scripts" / "render_stream_whiteboard.py"
 MERGE_SCRIPT = ROOT / "scripts" / "merge_scenes.py"
 DEFAULT_HAND = ROOT / "assets" / "drawing-hand.png"
@@ -42,6 +44,86 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         fail(f"Nội dung {path} phải là một JSON object")
     return data
+
+
+def discover_projects() -> list[Path]:
+    if not WHITEBOARD_ROOT.is_dir():
+        return []
+    return sorted(
+        path.parent
+        for path in WHITEBOARD_ROOT.glob("*/scenes.manifest.json")
+        if path.is_file()
+    )
+
+
+def read_project_id(project_dir: Path) -> str:
+    project_id = load_json(project_dir / "scenes.manifest.json").get("project_id")
+    if isinstance(project_id, str) and project_id.strip():
+        return project_id.strip()
+    return project_dir.name
+
+
+def describe_projects(projects: list[Path]) -> str:
+    return "\n".join(
+        f"  {read_project_id(project_dir)}    {project_dir.name}"
+        for project_dir in projects
+    )
+
+
+def resolve_projects(raw: Path | None) -> list[Path]:
+    """Chọn một project theo ID, tên thư mục hoặc đường dẫn."""
+    projects = discover_projects()
+    if not projects:
+        fail(
+            "Không có project nào trong assets/whiteboard. "
+            "Mỗi thư mục project cần scenes.manifest.json."
+        )
+    if raw is None:
+        if len(projects) == 1:
+            return projects
+        fail(
+            "assets/whiteboard có nhiều project. Hãy truyền project_id:\n"
+            f"{describe_projects(projects)}\n"
+            "Ví dụ: ./build_video.sh <project_id> --subtitles"
+        )
+
+    token = str(raw.expanduser())
+    exact_ids = [project for project in projects if read_project_id(project) == token]
+    if len(exact_ids) == 1:
+        return [exact_ids[0].resolve()]
+    if len(exact_ids) > 1:
+        fail(f"project_id {token} trùng nhiều thư mục:\n{describe_projects(exact_ids)}")
+
+    folder_matches = [project for project in projects if project.name == Path(token).name and "/" not in token and "\\" not in token]
+    if len(folder_matches) == 1 and not Path(token).is_absolute() and len(Path(token).parts) == 1:
+        return [folder_matches[0].resolve()]
+
+    expanded = raw.expanduser()
+    candidates = [expanded] if expanded.is_absolute() else [
+        Path.cwd() / expanded,
+        ROOT / expanded,
+        WHITEBOARD_ROOT / expanded,
+    ]
+    for candidate in candidates:
+        if (candidate / "scenes.manifest.json").is_file():
+            return [candidate.resolve()]
+
+    if len(token) >= 8:
+        prefix_matches = [
+            project for project in projects if read_project_id(project).startswith(token)
+        ]
+        if len(prefix_matches) == 1:
+            return [prefix_matches[0].resolve()]
+        if len(prefix_matches) > 1:
+            fail(
+                f"ID {token} khớp nhiều project. Hãy truyền đủ project_id:\n"
+                f"{describe_projects(prefix_matches)}"
+            )
+
+    fail(
+        f"Không tìm thấy project cho: {raw}\n"
+        f"Project trong assets/whiteboard:\n{describe_projects(projects)}"
+    )
 
 
 def load_manifest(project_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -341,42 +423,188 @@ def mux_audio(
     )
 
 
+def srt_timestamp(value: str) -> float:
+    hours, minutes, seconds = value.strip().replace(",", ".").split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def parse_srt(path: Path) -> list[tuple[float, float, str]]:
+    cues: list[tuple[float, float, str]] = []
+    blocks = re.split(r"\n\s*\n", path.read_text(encoding="utf-8-sig").strip())
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is None:
+            continue
+        start_text, end_text = lines[timing_index].split("-->", 1)
+        text = " ".join(lines[timing_index + 1 :]).strip()
+        if text.startswith("# "):
+            text = text[2:].strip()
+        if not text:
+            continue
+        start = srt_timestamp(start_text)
+        end = srt_timestamp(end_text.split()[0])
+        if end > start:
+            cues.append((start, end, text))
+    return cues
+
+
+def video_dimensions(path: Path) -> tuple[int, int]:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        fail("Không tìm thấy ffprobe để đọc kích thước video")
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    width_text, height_text = result.stdout.strip().split("x")
+    return int(width_text), int(height_text)
+
+
+def wrap_caption(draw: Any, text: str, font: Any, max_width: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        trial = word if not current else f"{current} {word}"
+        if draw.textlength(trial, font=font) <= max_width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def render_caption_png(
+    text: str,
+    width: int,
+    height: int,
+    destination: Path,
+    font_size: int,
+) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        fail("Thiếu Pillow. Hãy chạy: python3 scripts/prepare_env.py")
+
+    font_path = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
+    if not font_path.is_file():
+        font_path = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
+    if not font_path.is_file():
+        fail(f"Không tìm thấy font phụ đề: {font_path}")
+
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    max_width = width - 80
+    minimum_size = max(16, int(font_size * 0.7))
+    font = ImageFont.truetype(str(font_path), font_size)
+    lines = wrap_caption(draw, text, font, max_width)
+    while len(lines) > 3 and font_size > minimum_size:
+        font_size -= 2
+        font = ImageFont.truetype(str(font_path), font_size)
+        lines = wrap_caption(draw, text, font, max_width)
+
+    line_gap = 8
+    line_height = font_size + line_gap
+    block_height = line_height * len(lines) - line_gap
+    y = height - 28 - block_height
+    for line in lines:
+        line_width = draw.textlength(line, font=font)
+        x = (width - line_width) / 2
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=(35, 35, 35, 255),
+            stroke_width=3,
+            stroke_fill=(245, 235, 215, 255),
+        )
+        y += line_height
+    image.save(destination)
+
+
 def add_subtitles(
     ffmpeg: str,
     input_video: Path,
     subtitle: Path,
     output: Path,
     dry_run: bool,
+    font_size: int,
 ) -> None:
-    log("Nhúng phụ đề mềm tiếng Việt")
-    run(
-        [
-            ffmpeg,
-            "-y",
-            "-loglevel",
-            "warning",
-            "-i",
-            str(input_video),
-            "-i",
-            str(subtitle),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0",
-            "-map",
-            "1:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "copy",
-            "-c:s",
-            "mov_text",
-            "-metadata:s:s:0",
-            "language=vie",
-            str(output),
-        ],
-        dry_run,
-    )
+    cues = parse_srt(subtitle)
+    if not cues:
+        fail(f"Không có câu phụ đề trong {subtitle}")
+    log(f"Đốt {len(cues)} câu phụ đề lên hình, cỡ chữ {font_size}px")
+    if dry_run:
+        log(f"Sẽ ghi phụ đề từ {subtitle.name} vào {output.name}")
+        return
+
+    width, height = video_dimensions(input_video)
+    with tempfile.TemporaryDirectory(prefix="whiteboard-subs-") as temp_dir:
+        temp_path = Path(temp_dir)
+        blank = temp_path / "blank.png"
+        render_caption_png("", width, height, blank, font_size)
+        concat_lines = ["ffconcat version 1.0"]
+        cursor = 0.0
+        for index, (start, end, text) in enumerate(cues, start=1):
+            if start > cursor:
+                concat_lines.extend([f"file '{blank.name}'", f"duration {start - cursor:.3f}"])
+            caption = temp_path / f"cue-{index:03d}.png"
+            render_caption_png(text, width, height, caption, font_size)
+            concat_lines.extend([f"file '{caption.name}'", f"duration {end - start:.3f}"])
+            cursor = end
+        concat_lines.extend([f"file '{blank.name}'", "duration 1.000", f"file '{blank.name}'"])
+        concat_path = temp_path / "captions.ffconcat"
+        concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+        run(
+            [
+                ffmpeg,
+                "-y",
+                "-loglevel",
+                "warning",
+                "-i",
+                str(input_video),
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_path),
+                "-filter_complex",
+                "[0:v][1:v]overlay=0:0:shortest=1[v]",
+                "-map",
+                "[v]",
+                "-map",
+                "0:a:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                str(output),
+            ],
+            dry_run=False,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -387,14 +615,33 @@ def parse_args() -> argparse.Namespace:
         "project_dir",
         nargs="?",
         type=Path,
-        default=DEFAULT_PROJECT,
-        help="Thư mục chứa scenes.manifest.json (mặc định: whiteboard-vi)",
+        default=None,
+        help="project_id, tên thư mục hoặc đường dẫn. Bắt buộc khi assets/whiteboard có nhiều project.",
     )
     parser.add_argument("--init-only", action="store_true", help="Chỉ tạo annotation còn thiếu rồi dừng")
     parser.add_argument("--dry-run", action="store_true", help="Kiểm tra và in lệnh, không tạo video")
     parser.add_argument("--force-render", action="store_true", help="Render lại kể cả khi scene MP4 còn mới")
     parser.add_argument("--video-only", action="store_true", help="Chỉ tạo final-silent.mp4, không cần FFmpeg")
-    parser.add_argument("--no-subtitles", action="store_true", help="Tạo video có audio nhưng không nhúng SRT")
+    subtitles = parser.add_mutually_exclusive_group()
+    subtitles.add_argument(
+        "--subtitles",
+        dest="subtitles",
+        action="store_true",
+        help="Đốt phụ đề narration.srt lên hình (mặc định)",
+    )
+    subtitles.add_argument(
+        "--no-subtitles",
+        dest="subtitles",
+        action="store_false",
+        help="Xuất video có tiếng, không đốt phụ đề",
+    )
+    parser.set_defaults(subtitles=True)
+    parser.add_argument(
+        "--subtitle-size",
+        type=int,
+        default=34,
+        help="Cỡ chữ phụ đề, tính bằng pixel (mặc định: 34)",
+    )
     parser.add_argument("--ink-path", choices=["grid", "skeleton"], default="grid")
     parser.add_argument("--color-fill", choices=["contour-wipe", "brush"], default="contour-wipe")
     parser.add_argument("--fps", type=int, default=60)
@@ -405,46 +652,77 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_project(project_dir: Path, args: argparse.Namespace) -> None:
+    manifest, scenes = load_manifest(project_dir)
+    try:
+        folder_label = str(project_dir.relative_to(ROOT))
+    except ValueError:
+        folder_label = str(project_dir)
+    log(f"ID: {read_project_id(project_dir)}")
+    log(f"Thư mục: {folder_label}")
+    log(f"Project: {manifest.get('topic') or manifest.get('project_slug') or project_dir.name}")
+    log(f"Số scene: {len(scenes)}")
+    ensure_annotations(project_dir, scenes, args.dry_run)
+    if args.init_only:
+        log("Đã khởi tạo annotation. Mở assets/preview.html bằng Chrome để chỉnh trước khi build.")
+        return
+
+    ffmpeg = None if args.video_only or args.dry_run else require_ffmpeg()
+    if args.dry_run and not args.video_only and not shutil.which("ffmpeg"):
+        log("Cảnh báo: build có audio cần FFmpeg; cài bằng 'brew install ffmpeg'")
+
+    videos = render_scenes(project_dir, scenes, args)
+    silent_video = project_dir / "final-silent.mp4"
+    merge_videos(videos, silent_video, args.dry_run)
+    if args.video_only:
+        log(f"Hoàn thành: {silent_video}")
+        return
+
+    narration = project_dir / "narration-full.wav"
+    with_audio = project_dir / "final-with-audio.mp4"
+    build_narration_track(project_dir, scenes, narration, args.dry_run)
+    mux_audio(ffmpeg or "ffmpeg", silent_video, narration, with_audio, args.dry_run)
+
+    subtitle = project_dir / "narration.srt"
+    if args.output:
+        output = args.output.expanduser().resolve()
+    elif args.subtitles:
+        output = project_dir / "final-complete.mp4"
+    else:
+        output = project_dir / "final-without-subtitles.mp4"
+    if args.subtitle_size < 12:
+        fail("--subtitle-size phải từ 12 trở lên")
+    if not args.subtitles or not subtitle.is_file():
+        if args.subtitles and not subtitle.is_file():
+            log(f"Không thấy {subtitle.name}, xuất video không phụ đề")
+        if args.dry_run:
+            log(f"Sẽ sao chép {with_audio.name} thành {output.name}")
+        else:
+            shutil.copy2(with_audio, output)
+    else:
+        add_subtitles(
+            ffmpeg or "ffmpeg",
+            with_audio,
+            subtitle,
+            output,
+            args.dry_run,
+            args.subtitle_size,
+        )
+
+    log(f"Hoàn thành: {output}")
+
+
 def main() -> int:
     args = parse_args()
-    args.project_dir = args.project_dir.expanduser().resolve()
     args.hand = args.hand.expanduser().resolve()
     try:
-        manifest, scenes = load_manifest(args.project_dir)
-        log(f"Project: {manifest.get('topic') or manifest.get('project_slug') or args.project_dir.name}")
-        log(f"Số scene: {len(scenes)}")
-        ensure_annotations(args.project_dir, scenes, args.dry_run)
-        if args.init_only:
-            log("Đã khởi tạo annotation. Mở assets/preview.html bằng Chrome để chỉnh trước khi build.")
-            return 0
-
-        ffmpeg = None if args.video_only or args.dry_run else require_ffmpeg()
-        if args.dry_run and not args.video_only and not shutil.which("ffmpeg"):
-            log("Cảnh báo: build có audio cần FFmpeg; cài bằng 'brew install ffmpeg'")
-
-        videos = render_scenes(args.project_dir, scenes, args)
-        silent_video = args.project_dir / "final-silent.mp4"
-        merge_videos(videos, silent_video, args.dry_run)
-        if args.video_only:
-            log(f"Hoàn thành: {silent_video}")
-            return 0
-
-        narration = args.project_dir / "narration-full.wav"
-        with_audio = args.project_dir / "final-with-audio.mp4"
-        build_narration_track(args.project_dir, scenes, narration, args.dry_run)
-        mux_audio(ffmpeg or "ffmpeg", silent_video, narration, with_audio, args.dry_run)
-
-        subtitle = args.project_dir / "narration.srt"
-        output = (args.output.expanduser().resolve() if args.output else args.project_dir / "final-complete.mp4")
-        if args.no_subtitles or not subtitle.is_file():
-            if args.dry_run:
-                log(f"Sẽ sao chép {with_audio.name} thành {output.name}")
-            else:
-                shutil.copy2(with_audio, output)
-        else:
-            add_subtitles(ffmpeg or "ffmpeg", with_audio, subtitle, output, args.dry_run)
-
-        log(f"Hoàn thành: {output}")
+        projects = resolve_projects(args.project_dir)
+        if len(projects) > 1 and args.output is not None:
+            fail("--output chỉ dùng khi chỉ định một thư mục project.")
+        if len(projects) > 1:
+            log(f"Tìm thấy {len(projects)} project trong assets/whiteboard")
+        for project_dir in projects:
+            build_project(project_dir, args)
         return 0
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[error] {exc}", file=sys.stderr)

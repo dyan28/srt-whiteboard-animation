@@ -359,18 +359,18 @@ Ví dụ:
 
 Ý nghĩa các trường chính:
 
-| Trường | Ý nghĩa |
-|---|---|
-| `canvas.width`, `canvas.height` | Kích thước pixel chính xác của ảnh nguồn |
-| `sceneDurationMs` | Tổng thời lượng cảnh, tính bằng mili giây |
-| `sequence` | Thứ tự kể chuyện, bắt đầu từ 1 |
-| `region` | Hình chữ nhật chứa nội dung cần vẽ |
-| `reveal.startMs` | Thời điểm vùng bắt đầu được vẽ trong cảnh |
-| `reveal.durationMs` | Thời gian vẽ vùng |
-| `protectedRegions` | Những vùng phải giữ ẩn khi element hiện tại được vẽ |
-| `subtitle` | Câu phụ đề liên quan đến element |
-| `direction` | Hướng mô phỏng trong preview HTML |
-| `handPath` | Đường mô phỏng trong preview; renderer thật tự tìm đường bút |
+| Trường                          | Ý nghĩa                                                      |
+| ------------------------------- | ------------------------------------------------------------ |
+| `canvas.width`, `canvas.height` | Kích thước pixel chính xác của ảnh nguồn                     |
+| `sceneDurationMs`               | Tổng thời lượng cảnh, tính bằng mili giây                    |
+| `sequence`                      | Thứ tự kể chuyện, bắt đầu từ 1                               |
+| `region`                        | Hình chữ nhật chứa nội dung cần vẽ                           |
+| `reveal.startMs`                | Thời điểm vùng bắt đầu được vẽ trong cảnh                    |
+| `reveal.durationMs`             | Thời gian vẽ vùng                                            |
+| `protectedRegions`              | Những vùng phải giữ ẩn khi element hiện tại được vẽ          |
+| `subtitle`                      | Câu phụ đề liên quan đến element                             |
+| `direction`                     | Hướng mô phỏng trong preview HTML                            |
+| `handPath`                      | Đường mô phỏng trong preview; renderer thật tự tìm đường bút |
 
 Quy tắc annotation:
 
@@ -451,16 +451,16 @@ Ví dụ:
 
 Các tùy chọn hữu ích:
 
-| Tùy chọn | Giá trị | Mô tả |
-|---|---|---|
-| `--ink-path` | `grid` | Ổn định, phù hợp hầu hết ảnh |
-| `--ink-path` | `skeleton` | Bám theo line-art rõ hơn |
-| `--color-fill` | `contour-wipe` | Quét màu theo contour, là mặc định |
-| `--color-fill` | `brush` | Tô màu bằng brush đi theo quỹ đạo |
-| `--total-ms` | Số mili giây | Ghi đè `sceneDurationMs` |
-| `--fps` | Ví dụ `30`, `60` | Frame rate đầu ra |
+| Tùy chọn          | Giá trị             | Mô tả                                             |
+| ----------------- | ------------------- | ------------------------------------------------- |
+| `--ink-path`      | `grid`              | Ổn định, phù hợp hầu hết ảnh                      |
+| `--ink-path`      | `skeleton`          | Bám theo line-art rõ hơn                          |
+| `--color-fill`    | `contour-wipe`      | Quét màu theo contour, là mặc định                |
+| `--color-fill`    | `brush`             | Tô màu bằng brush đi theo quỹ đạo                 |
+| `--total-ms`      | Số mili giây        | Ghi đè `sceneDurationMs`                          |
+| `--fps`           | Ví dụ `30`, `60`    | Frame rate đầu ra                                 |
 | `--cap-long-edge` | Ví dụ `720`, `1080` | Giới hạn cạnh dài để điều chỉnh tốc độ/chất lượng |
-| `--bare-tip` | Không có giá trị | Không hiển thị ảnh bàn tay/bút |
+| `--bare-tip`      | Không có giá trị    | Không hiển thị ảnh bàn tay/bút                    |
 
 Gợi ý lựa chọn:
 
@@ -806,6 +806,7 @@ final-complete.mp4       # Video đã có audio và phụ đề
 ```
 
 Nếu chỉ cần video whiteboard không có âm thanh, `final-whiteboard.mp4` đã là sản phẩm cuối.
+
 ## 13. Build tự động từ `scenes.manifest.json`
 
 Script `scripts/build_whiteboard_video.py` tự động thực hiện các bước:
@@ -882,4 +883,38 @@ final-silent.mp4
 narration-full.wav
 final-with-audio.mp4
 final-complete.mp4
+```
+
+# BUILD
+
+Sau khi copy một thư mục export vào `assets/whiteboard`, gán `project_id` và đổi tên thư mục thành `{ngôn ngữ}-{project_id}`:
+
+```bash
+./rename_whiteboard.sh
+```
+
+Chỉ xử lý một thư mục:
+
+```bash
+./rename_whiteboard.sh ten-thu-muc-vua-copy
+```
+
+ID đã có trong `scenes.manifest.json` được giữ nguyên. Thư mục chưa có ID thì được gán UUID mới. Khi `assets/whiteboard` có nhiều project, lệnh build phải kèm ID đó.
+
+Có phụ đề, cỡ chữ mặc định 34px, ra file `final-complete.mp4`:
+
+```bash
+./build_video.sh <project_id> --subtitles
+```
+
+Có phụ đề và chọn cỡ chữ, ví dụ 42px:
+
+```bash
+./build_video.sh <project_id> --subtitles --subtitle-size 42
+```
+
+Không phụ đề, ra file `final-without-subtitles.mp4` và không ghi đè bản có chữ:
+
+```bash
+./build_video.sh <project_id> --no-subtitles
 ```
