@@ -96,13 +96,25 @@ def prepare_project(project_dir: Path, dry_run: bool) -> None:
     else:
         log(f"Giữ ID của {project_dir.name}: {project_id}")
 
-    target_name = folder_name(language_code(manifest), project_id)
+    language = language_code(manifest)
+    target_name = folder_name(language, project_id)
     target = project_dir.with_name(target_name)
     if project_dir.name == target_name:
         log(f"Tên thư mục đã đúng: {target_name}")
         return
     if target.exists():
-        fail(f"Không thể đổi {project_dir.name} thành {target_name} vì thư mục đích đã tồn tại")
+        # Bản copy giữ nguyên project_id của thư mục gốc, nên tên đích đã có chủ.
+        previous_id = project_id
+        project_id = str(uuid.uuid4())
+        while folder_name(language, project_id) == target_name or project_dir.with_name(folder_name(language, project_id)).exists():
+            project_id = str(uuid.uuid4())
+        manifest["project_id"] = project_id
+        assigned = True
+        target_name = folder_name(language, project_id)
+        target = project_dir.with_name(target_name)
+        log(f"ID {previous_id} đã dùng bởi thư mục khác; gán ID mới cho {project_dir.name}: {project_id}")
+        if not dry_run:
+            save_manifest(manifest_path, manifest)
     log(f"{project_dir.name} -> {target_name}")
     if not dry_run:
         project_dir.rename(target)

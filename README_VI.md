@@ -918,3 +918,10 @@ Không phụ đề, ra file `final-without-subtitles.mp4` và không ghi đè b�
 ```bash
 ./build_video.sh <project_id> --no-subtitles
 ```
+./build_video.sh en-5dbe2555-0b47-459a-9f8b-945693e1dba3 --subtitles --subtitle-size 18
+
+
+./build_video.sh n-eb25237e-53a9-404d-9fd8-6f05c5e0e0c2 --no-subtitles
+
+
+./build_video.sh en-5dbe2555-0b47-459a-9f8b-945693e1dba3 --init-only
