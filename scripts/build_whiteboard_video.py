@@ -171,9 +171,9 @@ def image_size(path: Path) -> tuple[int, int]:
         fail(f"Không thể đọc kích thước ảnh {path}: {exc}")
 
 
-def starter_annotation(scene: dict[str, Any], image_path: Path) -> dict[str, Any]:
+def starter_annotation(scene: dict[str, Any], image_path: Path, slot_ms: int) -> dict[str, Any]:
     width, height = image_size(image_path)
-    duration_ms = max(1000, int(round(float(scene.get("duration_sec", 8.0)) * 1000)))
+    duration_ms = max(1000, slot_ms)
     start_ms = 300
     draw_duration_ms = max(100, duration_ms - start_ms - 500)
     narration = str(scene.get("narration", ""))
@@ -214,7 +214,7 @@ def ensure_annotations(
     dry_run: bool,
 ) -> dict[str, dict[str, Any]]:
     annotations: dict[str, dict[str, Any]] = {}
-    for scene in scenes:
+    for index, scene in enumerate(scenes):
         paths = scene_paths(project_dir, scene)
         if not paths["image"].is_file():
             fail(f"Thiếu ảnh: {paths['image']}")
@@ -223,9 +223,21 @@ def ensure_annotations(
         if paths["annotation"].is_file():
             annotation = load_json(paths["annotation"])
         else:
-            annotation = starter_annotation(scene, paths["image"])
+            annotation = starter_annotation(scene, paths["image"], slot_duration_ms(scenes, index))
             log(f"Tạo annotation toàn cảnh: {paths['annotation'].name}")
             if not dry_run:
+                paths["annotation"].write_text(
+                    json.dumps(annotation, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+        slot_ms = slot_duration_ms(scenes, index)
+        trimmed_ms = sync_annotation_timing(annotation, slot_ms)
+        if trimmed_ms:
+            log(
+                f"Khớp timeline {paths['annotation'].name}: "
+                f"rút {trimmed_ms}ms để chừa 500ms cuối"
+            )
+            if not dry_run and paths["annotation"].is_file():
                 paths["annotation"].write_text(
                     json.dumps(annotation, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
@@ -233,6 +245,50 @@ def ensure_annotations(
         validate_annotation(paths["annotation"], annotation, scenes, scene)
         annotations[str(scene["stem"])] = annotation
     return annotations
+
+
+def sync_annotation_timing(annotation: dict[str, Any], slot_ms: int) -> int:
+    """Rút nét vẽ nếu chỉ lệch vài chục ms so với khe timeline. Trả về số ms đã rút."""
+    elements = annotation.get("elements")
+    if not isinstance(elements, list) or not elements:
+        return 0
+    limit = slot_ms - 500
+    if limit <= 0:
+        return 0
+    ends: list[int] = []
+    for element in elements:
+        reveal = element.get("reveal") if isinstance(element, dict) else None
+        if not isinstance(reveal, dict):
+            return 0
+        try:
+            ends.append(int(reveal["startMs"]) + int(reveal["durationMs"]))
+        except (KeyError, TypeError, ValueError):
+            return 0
+    overflow = max(ends) - limit
+    if overflow <= 0 or overflow > 50:
+        return 0
+    cuts = [0] * len(elements)
+    remaining = overflow
+    for index in sorted(range(len(elements)), key=lambda item: ends[item], reverse=True):
+        if remaining <= 0:
+            break
+        start_ms = int(elements[index]["reveal"]["startMs"])
+        duration_ms = int(elements[index]["reveal"]["durationMs"])
+        end_ms = start_ms + duration_ms
+        if end_ms <= limit:
+            continue
+        cut = min(remaining, end_ms - limit, duration_ms - 1)
+        if cut <= 0:
+            continue
+        cuts[index] = cut
+        remaining -= cut
+    if remaining > 0:
+        return 0
+    for index, cut in enumerate(cuts):
+        if cut:
+            elements[index]["reveal"]["durationMs"] = int(elements[index]["reveal"]["durationMs"]) - cut
+    annotation["sceneDurationMs"] = slot_ms
+    return overflow
 
 
 def validate_annotation(
