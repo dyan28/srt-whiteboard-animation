@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import shlex
 import shutil
@@ -21,9 +22,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 WHITEBOARD_ROOT = ROOT / "assets" / "whiteboard"
+MUSIC_ROOT = ROOT / "assets" / "music"
 RENDER_SCRIPT = ROOT / "scripts" / "render_stream_whiteboard.py"
 MERGE_SCRIPT = ROOT / "scripts" / "merge_scenes.py"
 DEFAULT_HAND = ROOT / "assets" / "drawing-hand.png"
+DEFAULT_MUSIC_VOLUME = 0.20
 
 
 def log(message: str) -> None:
@@ -444,14 +447,122 @@ def require_ffmpeg() -> str:
     return ffmpeg
 
 
+def list_music_files(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".mp3"
+    )
+
+
+def resolve_music_track(project_dir: Path, music_arg: Path | None) -> Path | None:
+    if music_arg is not None:
+        candidates = [music_arg] if music_arg.is_absolute() else [
+            Path.cwd() / music_arg,
+            ROOT / music_arg,
+            project_dir / music_arg,
+            MUSIC_ROOT / music_arg,
+        ]
+        for candidate in candidates:
+            if candidate.is_file() and candidate.suffix.lower() == ".mp3":
+                return candidate.resolve()
+        fail(f"Không tìm thấy file nhạc MP3: {music_arg}")
+
+    project_tracks = list_music_files(project_dir / "music")
+    shared_tracks = list_music_files(MUSIC_ROOT)
+    tracks = project_tracks or shared_tracks
+    if not tracks:
+        return None
+    chosen = random.choice(tracks)
+    source = "project/music" if project_tracks else "assets/music"
+    log(f"Chọn ngẫu nhiên nhạc từ {source}: {chosen.name}")
+    return chosen
+
+
+def media_duration_sec(path: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        fail("Không tìm thấy ffprobe để đọc độ dài video/nhạc")
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError as exc:
+        fail(f"Không đọc được độ dài của {path}: {exc}")
+    if duration <= 0:
+        fail(f"Độ dài không hợp lệ của {path}: {duration}")
+    return duration
+
+
 def mux_audio(
     ffmpeg: str,
     silent_video: Path,
     narration: Path,
     output: Path,
     dry_run: bool,
+    music: Path | None = None,
+    music_volume: float = DEFAULT_MUSIC_VOLUME,
 ) -> None:
-    log("Ghép audio AAC vào video")
+    if music is None:
+        log("Ghép audio AAC vào video")
+        run(
+            [
+                ffmpeg,
+                "-y",
+                "-loglevel",
+                "warning",
+                "-i",
+                str(silent_video),
+                "-i",
+                str(narration),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-shortest",
+                str(output),
+            ],
+            dry_run,
+        )
+        return
+
+    if music_volume <= 0 or music_volume > 1:
+        fail("--music-volume phải nằm trong khoảng (0, 1], ví dụ 0.15")
+    video_duration = media_duration_sec(silent_video)
+    music_duration = media_duration_sec(music)
+    if music_duration > video_duration:
+        log(
+            f"Nhạc {music.name} dài {music_duration:.2f}s > video {video_duration:.2f}s — "
+            f"cắt bằng độ dài video"
+        )
+    else:
+        log(
+            f"Nhạc {music.name} ngắn hơn video — lặp rồi cắt bằng độ dài video "
+            f"({video_duration:.2f}s)"
+        )
+    log(f"Âm lượng nhạc {music_volume:.0%} so với giọng gốc")
+    duration_text = f"{video_duration:.3f}"
     run(
         [
             ffmpeg,
@@ -462,17 +573,29 @@ def mux_audio(
             str(silent_video),
             "-i",
             str(narration),
+            "-i",
+            str(music),
+            "-filter_complex",
+            (
+                f"[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"volume=1.0,apad,atrim=0:{duration_text},asetpts=PTS-STARTPTS[voice];"
+                f"[2:a]aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"aloop=loop=-1:size=2147483647,atrim=0:{duration_text},"
+                f"volume={music_volume:.4f},asetpts=PTS-STARTPTS[bgm];"
+                f"[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+            ),
             "-map",
             "0:v:0",
             "-map",
-            "1:a:0",
+            "[aout]",
             "-c:v",
             "copy",
             "-c:a",
             "aac",
             "-b:a",
             "192k",
-            "-shortest",
+            "-t",
+            duration_text,
             str(output),
         ],
         dry_run,
@@ -698,6 +821,23 @@ def parse_args() -> argparse.Namespace:
         default=34,
         help="Cỡ chữ phụ đề, tính bằng pixel (mặc định: 34)",
     )
+    parser.add_argument(
+        "--music",
+        type=Path,
+        default=None,
+        help="File MP3 cụ thể. Bỏ trống để chọn ngẫu nhiên từ project/music hoặc assets/music.",
+    )
+    parser.add_argument(
+        "--no-music",
+        action="store_true",
+        help="Không ghép nhạc nền dù thư mục music có file MP3",
+    )
+    parser.add_argument(
+        "--music-volume",
+        type=float,
+        default=DEFAULT_MUSIC_VOLUME,
+        help="Âm lượng nhạc so với giọng gốc, từ 0 đến 1 (mặc định: 0.15 = 15%%)",
+    )
     parser.add_argument("--ink-path", choices=["grid", "skeleton"], default="grid")
     parser.add_argument("--color-fill", choices=["contour-wipe", "brush"], default="contour-wipe")
     parser.add_argument("--fps", type=int, default=60)
@@ -737,7 +877,18 @@ def build_project(project_dir: Path, args: argparse.Namespace) -> None:
     narration = project_dir / "narration-full.wav"
     with_audio = project_dir / "final-with-audio.mp4"
     build_narration_track(project_dir, scenes, narration, args.dry_run)
-    mux_audio(ffmpeg or "ffmpeg", silent_video, narration, with_audio, args.dry_run)
+    music = None if args.no_music else resolve_music_track(project_dir, args.music)
+    if music is None and not args.no_music:
+        log("Không có MP3 trong music/ của project hoặc assets/music — bỏ qua nhạc nền")
+    mux_audio(
+        ffmpeg or "ffmpeg",
+        silent_video,
+        narration,
+        with_audio,
+        args.dry_run,
+        music=music,
+        music_volume=args.music_volume,
+    )
 
     subtitle = project_dir / "narration.srt"
     if args.output:

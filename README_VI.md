@@ -918,10 +918,28 @@ Không phụ đề, ra file `final-without-subtitles.mp4` và không ghi đè b�
 ```bash
 ./build_video.sh <project_id> --no-subtitles
 ```
-./build_video.sh en-5dbe2555-0b47-459a-9f8b-945693e1dba3 --subtitles --subtitle-size 18
 
+## Nhạc nền MP3
 
-./build_video.sh n-eb25237e-53a9-404d-9fd8-6f05c5e0e0c2 --no-subtitles
+Đặt file `.mp3` vào:
 
+- `assets/music/` — dùng chung cho mọi project
+- hoặc `assets/whiteboard/<project>/music/` — nhạc riêng từng project
 
-./build_video.sh en-5dbe2555-0b47-459a-9f8b-945693e1dba3 --init-only
+Khi build, nếu có MP3 thì script tự ghép nhạc vào video. Giọng đọc giữ 100%, nhạc mặc định bằng **15%**.
+
+- Nhạc dài hơn video: tự cắt đúng bằng độ dài video.
+- Nhạc ngắn hơn video: tự lặp rồi cắt đúng bằng độ dài video.
+
+```bash
+# Mặc định: chọn ngẫu nhiên 1 bài trong list, âm lượng nhạc 15%
+./build_video.sh vi-0df025cc-ae89-4f4b-8dbc-4d88cb1d6745 --subtitles --subtitle-size 18
+
+# Chỉ định bài cụ thể và chỉnh âm lượng
+./build_video.sh <project_id> --music assets/music/ten-bai.mp3 --music-volume 0.15
+
+# Không ghép nhạc
+./build_video.sh <project_id> --no-music
+```
+./build_video.sh vi-0c3078ad-ec8b-46a5-abb7-ff974d9ae376
+./build_video.sh vi-0c3078ad-ec8b-46a5-abb7-ff974d9ae376 --init-only   
